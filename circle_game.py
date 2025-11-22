@@ -1,0 +1,233 @@
+
+import pygame
+import sys
+import random
+import numpy as np
+import numpy.typing as npt
+from food_manager import FoodManager
+from geometry_utils import get_intersect, make_vector_from_tet, rotate_2d_vector, get_total_distance
+
+
+class BoxDomain:
+
+    def __init__(self,
+                 width: float = 1000.0,
+                 height: float = 1000.0,
+                 ):
+        self.width = width
+        self.height= height
+
+        self.WINDOW_HEIGHT = self.height
+
+        self.WALL_START_X = [0 , width , width , 0 ]
+        self.WALL_START_Y = [0 , 0 , height , height ]
+        self.WALL_END_X = [width , width ,  0 , 0 ]
+        self.WALL_END_Y = [0 , height , height , 0 ]
+        self.WALL_DIRECTIONS_X = [1, 0, -1, 0]
+        self.WALL_DIRECTIONS_Y = [0, 1, 0, -1]
+        self.food_pos_tot = []
+        self.total_food_count = 0
+
+
+
+
+    @property
+    def W(self) -> float:
+        return self.width
+
+    @property
+    def H(self) -> float:
+        return self.height
+
+
+class Player:
+    def __init__(self,
+                 domain: BoxDomain,
+                 color,
+                 start_point: tuple[float, float],
+                 radius,
+                 turn_angle_min: float = -0.5, 
+                 turn_angle_max: float = 0.5,
+                 run_dist_min: float = 10.0,
+                 run_dist_max: float = 60.0,
+                 ):
+
+        self.radius = radius
+
+        self.trajLength = None
+        self.lastPwasInters = None
+        self.lastIntersWallInd = None
+        self.totalEatenIndices = []
+        self.color = color
+        self.trajectory = [start_point]
+        self.current_tet = 0
+
+        self.turn_angle_min = turn_angle_min
+        self.turn_angle_max = turn_angle_max
+        self.run_dist_min = run_dist_min
+        self.run_dist_max = run_dist_max
+
+        self.eaten_count = 0
+
+        start = np.vstack([domain.WALL_START_X, domain.WALL_START_Y]).astype(float)
+        end = np.vstack([domain.WALL_END_X, domain.WALL_END_Y]).astype(float)
+        dirs = np.array([[1, -1, -1, 1],
+                         [1, 1, -1, -1]])
+
+        dirs_end = np.array([[-1, -1, 1, 1],
+                         [1, -1, -1, 1]])
+        start += self.radius * dirs
+        end += self.radius * dirs_end
+
+        self.wall_start_coordinates = start.tolist()
+        self.wall_end_coordinates = end.tolist()
+        self.wall_directions = [domain.WALL_DIRECTIONS_X, domain.WALL_DIRECTIONS_Y]
+
+    @property
+    def x(self) -> float:
+        return float(self.trajectory[-1][0])
+
+    @property
+    def y(self) -> float:
+        return float(self.trajectory[-1][1])
+
+    @property
+    def theta(self) -> float:
+        return float(self.current_tet)
+
+    def set_pose(self, x: float, y: float, theta: float) -> None:
+        self.trajectory = [(float(x), float(y))]
+        self.current_tet = float(theta)
+        self.lastPwasInters = False
+        self.lastIntersWallInd = None
+
+    def draw(self, screen):
+        current_pos = self.trajectory[-1]
+        old_pos = self.trajectory[-2] if len(self.trajectory) > 1 else current_pos
+        pygame.draw.circle(screen, self.color, current_pos, self.radius)
+        pygame.draw.line(screen, [0, 255, 0], old_pos, current_pos, 3)
+        pygame.draw.circle(screen, [0, 255, 0], old_pos, 2)
+
+
+    def obtain_new_dir(self, current_dir, turning_angle):
+
+        
+        if self.lastPwasInters:
+            i = self.lastIntersWallInd
+            this_wall_direction = [self.wall_directions[0][i], self.wall_directions[1][i]]
+            V1 = current_dir[0] * this_wall_direction[0] + current_dir[1] * this_wall_direction[1]
+            V1 = [this_wall_direction[0] * V1, this_wall_direction[1] * V1]
+            V2 = [current_dir[0] - V1[0], current_dir[1] - V1[1]]
+            V2 = [-V2[0], -V2[1]]
+            new_dir = [V1[0] + V2[0], V1[1] + V2[1]]
+        else:
+            new_dir = rotate_2d_vector( alpha = turning_angle, d = current_dir)
+        
+        return new_dir
+
+
+    def player_move(self):
+  
+        turning_angle = random.uniform(self.turn_angle_min, self.turn_angle_max)
+        run_length = random.uniform(self.run_dist_min, self.run_dist_max)
+        
+        current_dir = make_vector_from_tet(self.current_tet)
+        new_dir = self.obtain_new_dir(current_dir, turning_angle)
+        self.current_tet = np.atan2(new_dir[1], new_dir[0]) 
+        p_new = (self.trajectory[-1][0] + run_length * new_dir[0], self.trajectory[-1][1] + run_length * new_dir[1])
+        
+
+        self.lastPwasInters = False
+        for i in range(4):
+            wall_start = [self.wall_start_coordinates[0][i], self.wall_start_coordinates[1][i]]
+            wall_end = [self.wall_end_coordinates[0][i], self.wall_end_coordinates[1][i]]
+            intersection_point = get_intersect(self.trajectory[-1], p_new, wall_start, wall_end)
+            if intersection_point:
+                backoff = 1e-5
+                p_new = (intersection_point[0] - new_dir[0]*backoff, intersection_point[1] - new_dir[1]*backoff)
+                self.lastPwasInters = True
+                self.lastIntersWallInd = i
+                break
+
+        self.trajectory.append(p_new)
+
+class Game:
+    def __init__(self,
+                 domain: BoxDomain,
+                 show_gui: bool,
+                 players: list[Player],
+                 food_manager: FoodManager,
+                 fps: int = 60,
+                 ):
+        self.show_gui = show_gui
+        self.players = players
+        self.food_manager = food_manager
+        self.food_remains: bool = True
+        if self.show_gui:
+                self.fps = fps
+                pygame.init()
+                pygame.font.init()
+                self.font = pygame.font.SysFont(None, 15)
+                self.screen = pygame.display.set_mode((domain.width, domain.height))
+                pygame.display.set_caption("Circle Game")
+
+
+    def step(self):
+        for player in self.players:
+            player.player_move()
+            eaten_now = self.food_manager.eat_in_swept_region(player.trajectory[-2], player.trajectory[-1], player.radius)
+            player.eaten_count += len(eaten_now)
+            self.food_remains = self.food_manager.remaining_count > 0
+
+    def draw_game(self):
+        if self.show_gui:
+            self.screen.fill("black")
+            for player in self.players:
+                player.draw(self.screen)
+            self.food_manager.draw_food(self.screen)
+            pygame.display.flip()
+            pygame.time.Clock().tick(self.fps)
+
+    def game_loop(self):
+
+        simulation_steps: int = 0
+        self.draw_game()
+        while self.food_remains:
+            self.step()
+            self.draw_game()
+            simulation_steps += 1
+
+
+        print(f"{self.food_manager.remaining_count} out of {len(self.food_manager.food_positions)} remains.")
+        pygame.quit()
+        return simulation_steps
+
+def main():
+
+    domain = BoxDomain()
+    food_manager = FoodManager(width=domain.width)
+    food_manager.create_food(grid_size=40, offset=150.0)
+
+    p1_start = (110, 110)
+    player1 = Player(color = "red",
+                     start_point=p1_start,
+                     radius = 100,
+                     run_dist_min = 50.0,
+                     run_dist_max = 60.0,
+                     domain=domain)
+
+
+    game = Game(show_gui=True, domain=domain, fps=60, players=[player1], food_manager=food_manager)
+
+
+
+    final_step_count = game.game_loop()
+
+
+
+    total_distance = get_total_distance(np.array(player1.trajectory))
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
